@@ -3,7 +3,7 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name            = "depwise"
+name = "depheal"
 version         = "0.1.0"
 description     = "dependency health scanner — cross-language, offline-first, no account needed"
 readme          = "README.md"

@@ -44,7 +44,7 @@ depwise fixes all of this.
 ## install
 
 ```bash
-pip install depwise
+pip install depheal
 ```
 
 no account. no api key. no config file. works immediately.
