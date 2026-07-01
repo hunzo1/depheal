@@ -32,6 +32,9 @@ def _severity_color(severity: str) -> str:
     }.get(severity, "")
 
 
+ORANGE = "\033[38;5;208m" if COLOR else ""
+
+
 def _status_label(result: dict) -> str:
     status = result["status"]
     if status == "vulnerable":
@@ -42,6 +45,8 @@ def _status_label(result: dict) -> str:
         return f"{YELLOW}abandoned{RESET}"
     if status == "unpinned":
         return f"{GRAY}unpinned{RESET}"
+    if status == "check_failed":
+        return f"{ORANGE}unknown (check failed){RESET}"
     return f"{GREEN}ok{RESET}"
 
 
@@ -114,9 +119,10 @@ def print_results(results: list[dict]):
         print()
 
     # Summary line
-    vulnerable = [r for r in issues if r["status"] == "vulnerable"]
-    abandoned  = [r for r in issues if r["status"] == "abandoned"]
-    unpinned   = [r for r in issues if r["status"] == "unpinned"]
+    vulnerable    = [r for r in issues if r["status"] == "vulnerable"]
+    abandoned     = [r for r in issues if r["status"] == "abandoned"]
+    unpinned      = [r for r in issues if r["status"] == "unpinned"]
+    check_failed  = [r for r in issues if r["status"] == "check_failed"]
 
     parts = []
     if vulnerable:
@@ -125,6 +131,8 @@ def print_results(results: list[dict]):
         parts.append(f"{YELLOW}{len(abandoned)} abandoned{RESET}")
     if unpinned:
         parts.append(f"{GRAY}{len(unpinned)} unpinned{RESET}")
+    if check_failed:
+        parts.append(f"{ORANGE}{len(check_failed)} unknown (network check failed){RESET}")
     if clean:
         parts.append(f"{GREEN}{len(clean)} ok{RESET}")
 

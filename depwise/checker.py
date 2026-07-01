@@ -68,17 +68,22 @@ def _http_get(url: str, timeout: int = 10) -> dict | None:
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {}  # genuinely not found — not a failure
+        return None  # other HTTP errors (5xx, rate limit, etc) — a real failure
     except Exception:
         return None
 
 
-def check_osv(name: str, version: str, ecosystem: str = "PyPI") -> list[dict]:
+def check_osv(name: str, version: str, ecosystem: str = "PyPI") -> list[dict] | None:
     """
     Query OSV API for known vulnerabilities.
-    Returns list of vulnerability dicts.
+    Returns list of vulnerability dicts, or None if the check failed
+    (network error, timeout, etc.) -- callers must treat None as
+    'unknown' not 'clean'.
     """
     if not version:
-        # Query without version — get all known vulns for this package
         payload = {"package": {"name": name, "ecosystem": ecosystem}}
     else:
         payload = {
@@ -87,12 +92,11 @@ def check_osv(name: str, version: str, ecosystem: str = "PyPI") -> list[dict]:
         }
 
     result = _http_post(f"{OSV_API}/query", payload)
-    if not result:
-        return []
+    if result is None:
+        return None  # real failure — propagate upward, don't swallow
 
     vulns = []
     for vuln in result.get("vulns", []):
-        # Extract the most useful fields
         vuln_id   = vuln.get("id", "")
         summary   = vuln.get("summary", "")
         details   = vuln.get("details", "")
@@ -110,7 +114,6 @@ def check_osv(name: str, version: str, ecosystem: str = "PyPI") -> list[dict]:
             "published": published,
         })
 
-    # Sort by severity
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
     vulns.sort(key=lambda v: severity_order.get(v["severity"], 4))
 
@@ -156,11 +159,12 @@ def _extract_fixed_version(vuln: dict, package_name: str) -> str:
     return ""
 
 
-def check_abandonment(name: str, ecosystem: str = "PyPI") -> dict:
+def check_abandonment(name: str, ecosystem: str = "PyPI") -> dict | None:
     """
     Check if a package appears abandoned.
-    Uses PyPI JSON API for Python packages.
-    Returns {abandoned, days_since_update, reason}
+    Returns {abandoned, days_since_update, reason, deprecated}, or
+    None if the check genuinely failed (network error, timeout, etc.)
+    so callers can distinguish 'checked and ok' from 'check failed'.
     """
     result = {
         "abandoned":          False,
@@ -169,7 +173,7 @@ def check_abandonment(name: str, ecosystem: str = "PyPI") -> dict:
         "deprecated":         False,
     }
 
-    # Check known abandoned list first
+    # Known abandoned list is always available offline — no failure possible here
     if name.lower() in KNOWN_ABANDONED:
         result["abandoned"] = True
         result["reason"]    = KNOWN_ABANDONED[name.lower()]
@@ -178,8 +182,10 @@ def check_abandonment(name: str, ecosystem: str = "PyPI") -> dict:
 
     if ecosystem == "PyPI":
         data = _http_get(f"https://pypi.org/pypi/{name}/json")
+        if data is None:
+            return None  # real network failure — not 'ok', not 'abandoned', unknown
         if not data:
-            return result
+            return result  # 404 — package not found, treat as ok
 
         info = data.get("info", {})
 
@@ -225,8 +231,10 @@ def check_abandonment(name: str, ecosystem: str = "PyPI") -> dict:
 
     elif ecosystem == "npm":
         data = _http_get(f"https://registry.npmjs.org/{name}")
+        if data is None:
+            return None  # real network failure
         if not data:
-            return result
+            return result  # 404 — package not found
 
         # Check if deprecated
         dist_tags = data.get("dist-tags", {})
@@ -278,8 +286,10 @@ def _get_latest_release_date(releases: dict) -> datetime | None:
 
 def check_package(name: str, version: str, ecosystem: str = "PyPI") -> dict:
     """
-    Full check for a single package.
-    Returns complete health report.
+    Full check for a single package. Returns complete health report.
+    status is one of: ok, vulnerable, abandoned, unpinned, check_failed.
+    check_failed means the network check didn't complete -- NOT the same
+    as ok. Displaying check_failed as ok is a security tool's worst failure.
     """
     result = {
         "name":        name,
@@ -288,21 +298,36 @@ def check_package(name: str, version: str, ecosystem: str = "PyPI") -> dict:
         "vulns":       [],
         "abandonment": {},
         "unpinned":    not version or version == "",
-        "status":      "ok",  # ok, vulnerable, abandoned, unpinned
+        "status":      "ok",
         "worst_severity": "NONE",
         "fix":         "",
         "summary":     "",
+        "check_failed": False,
     }
 
-    # Check vulnerabilities
-    vulns = check_osv(name, version, ecosystem)
-    result["vulns"] = vulns
-
-    # Check abandonment
+    vulns       = check_osv(name, version, ecosystem)
     abandonment = check_abandonment(name, ecosystem)
+
+    osv_failed  = vulns is None
+    abn_failed  = abandonment is None
+
+    if osv_failed or abn_failed:
+        result["check_failed"] = True
+        result["status"]       = "check_failed"
+        result["summary"]      = (
+            "could not reach osv.dev or PyPI — vulnerability status unknown. "
+            "Do not treat this as clean."
+        )
+        # Still report whatever partial data we have
+        if not osv_failed:
+            result["vulns"] = vulns or []
+        if not abn_failed:
+            result["abandonment"] = abandonment or {}
+        return result
+
+    result["vulns"]       = vulns
     result["abandonment"] = abandonment
 
-    # Determine overall status
     if abandonment.get("abandoned"):
         result["status"] = "abandoned"
 
@@ -321,10 +346,7 @@ def check_package(name: str, version: str, ecosystem: str = "PyPI") -> dict:
             result["worst_severity"] = "LOW"
             result["status"] = "vulnerable"
 
-        # Get fix version from worst vuln
-        result["fix"] = vulns[0].get("fixed_in", "")
-
-        # Build plain english summary
+        result["fix"]     = vulns[0].get("fixed_in", "")
         result["summary"] = vulns[0].get("summary", "")
 
     elif abandonment.get("abandoned"):
@@ -358,8 +380,8 @@ def check_all(packages: list[dict], ecosystem: str = "PyPI") -> list[dict]:
         if i > 0 and i % 10 == 0:
             time.sleep(0.5)
 
-    # Sort: vulnerable first, then abandoned, then unpinned, then ok
-    status_order = {"vulnerable": 0, "abandoned": 1, "unpinned": 2, "ok": 3}
+    # Sort: vulnerable first, then abandoned, then check_failed, then unpinned, then ok
+    status_order = {"vulnerable": 0, "abandoned": 1, "check_failed": 2, "unpinned": 3, "ok": 4}
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "NONE": 4}
 
     results.sort(key=lambda r: (
